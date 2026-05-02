@@ -7,7 +7,7 @@ export const scrapeRouter = Router();
 // ------------------------------------------------------------------
 // AliExpress Official Affiliate API
 // Docs: https://openservice.aliexpress.com/doc/api.htm
-// Endpoint: http://gw.api.taobao.com/router/rest
+// Endpoint: http://gw.api.taobao.com/router/rest  (HTTP, no HTTPS)
 // Method:   aliexpress.affiliate.productdetail.get
 //
 // Requires APP_KEY + APP_SECRET from:
@@ -16,7 +16,7 @@ export const scrapeRouter = Router();
 //   3. Set env vars: ALIEXPRESS_APP_KEY / ALIEXPRESS_APP_SECRET
 // ------------------------------------------------------------------
 
-const API_URL = "https://gw.api.taobao.com/router/rest";
+const API_URL = "http://gw.api.taobao.com/router/rest";
 
 const scrapeSchema = z.object({
   url: z.string().url().max(2000).refine((u) => u.includes("aliexpress.com"), {

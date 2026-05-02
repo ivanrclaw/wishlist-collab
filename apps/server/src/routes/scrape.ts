@@ -10,7 +10,7 @@ const scrapeSchema = z.object({
   }),
 });
 
-function httpsGet(url: string, headers: Record<string, string> = {}): Promise<string> {
+function fetchPage(url: string): Promise<{ body: string; finalUrl: string }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
 
@@ -20,30 +20,48 @@ function httpsGet(url: string, headers: Record<string, string> = {}): Promise<st
       method: "GET",
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Accept: "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        Referer: "https://www.aliexpress.com/",
-        ...headers,
+          "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
       },
-      timeout: 8000,
+      timeout: 10000,
     };
 
     const req = https.request(options, (res) => {
-      // Follow redirects
+      // Handle redirects
       if (
         res.statusCode &&
         [301, 302, 303, 307, 308].includes(res.statusCode) &&
         res.headers.location
       ) {
         res.resume();
-        const redirectUrl = new URL(res.headers.location, url).href;
-        return httpsGet(redirectUrl, headers).then(resolve).catch(reject);
+        let redirectUrl = new URL(res.headers.location, url).href;
+        // Normalize es.aliexpress → www.aliexpress or keep as-is
+        return fetchPage(redirectUrl).then(resolve).catch(reject);
+      }
+
+      if (!res.statusCode || res.statusCode >= 400) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode}`));
       }
 
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+      res.on("end", () => {
+        resolve({
+          body: Buffer.concat(chunks).toString("utf-8"),
+          finalUrl: url,
+        });
+      });
     });
 
     req.on("error", reject);
@@ -56,14 +74,7 @@ function httpsGet(url: string, headers: Record<string, string> = {}): Promise<st
 }
 
 function extractProductId(url: string): string | null {
-  // Patterns: /item/1005006143501688.html, /item/1005006143501688, productId=1005006143501688
-  const patterns = [
-    /\/item\/(\d+)/,
-    /productId=(\d+)/,
-    /\/products\/(\d+)/,
-    /\/i\/(\d+)/,
-  ];
-
+  const patterns = [/\/item\/(\d+)/, /productId=(\d+)/, /\/i\/(\d+)/];
   for (const p of patterns) {
     const m = url.match(p);
     if (m) return m[1];
@@ -71,152 +82,88 @@ function extractProductId(url: string): string | null {
   return null;
 }
 
-function cleanJsonp(text: string): string {
-  // Remove JSONP wrapper: mtopjsonp1({...}) -> {...}
-  let cleaned = text.replace(/^[^(]*\(/, "").replace(/\)\s*$/, "");
-  // Sometimes double-wrapped
-  if (cleaned.startsWith('"') || cleaned.startsWith("{")) {
-    try {
-      JSON.parse(cleaned);
-      return cleaned;
-    } catch {
-      // Not valid yet, try more cleaning
-    }
-  }
-  return cleaned;
-}
-
-async function scrapeViaApi(productId: string): Promise<{
+function extractFromHtml(html: string): {
   title: string;
-  image: string;
+  imageUrl: string;
   price: string;
-} | null> {
-  const apiHosts = [
-    "www.aliexpress.com",
-    "es.aliexpress.com",
-    "aliexpress.com",
-  ];
+} {
+  let title = "";
+  let imageUrl = "";
+  let price = "";
 
-  for (const host of apiHosts) {
+  // 1) window.runData (server-side rendered JSON)
+  const rdMatch = html.match(/window\.runData\s*=\s*(\{.+?\});\s*<\/script>/s);
+  if (rdMatch) {
     try {
-      // Try the header API endpoint
-      const apiUrl = `https://${host}/aeglodetailweb/api/header?productId=${productId}`;
-      const raw = await httpsGet(apiUrl, {
-        Referer: `https://${host}/item/${productId}.html`,
-      });
-
-      const data = JSON.parse(raw);
-
-      const title =
-        data?.data?.productInfo?.subject ||
-        data?.data?.title ||
-        data?.productInfo?.subject ||
+      const rd = JSON.parse(rdMatch[1]);
+      const p = rd?.data?.priceModule;
+      price =
+        p?.formatedActivityPrice ||
+        p?.formatedPrice ||
+        p?.price ||
         "";
-
-      const image =
-        data?.data?.productInfo?.imageUrl ||
-        data?.data?.imageUrl ||
+      title =
+        rd?.data?.pageModule?.title ||
+        rd?.data?.titleModule?.subject ||
         "";
-
-      const price =
-        data?.data?.priceModule?.formatedActivityPrice ||
-        data?.data?.priceModule?.formatedPrice ||
-        data?.data?.productInfo?.price ||
+      const img =
+        rd?.data?.pageModule?.imagePath ||
+        rd?.data?.imageModule?.imagePathList?.[0] ||
         "";
+      if (img) imageUrl = img.startsWith("//") ? `https:${img}` : img;
+    } catch { /* fall through */ }
+  }
 
-      if (title) {
-        return {
-          title: title.substring(0, 200),
-          image: image.startsWith("//") ? `https:${image}` : image,
-          price: price || "",
-        };
-      }
-    } catch {
-      // Try next host
+  // 2) window.__data (another common pattern)
+  if (!title) {
+    const dcMatch = html.match(/window\.__data\s*=\s*['"](\{.+?\})['"];/s);
+    if (dcMatch) {
+      try {
+        const dc = JSON.parse(dcMatch[1]);
+        title = dc?.productInfo?.subject || dc?.title || "";
+        price =
+          dc?.priceModule?.formatedActivityPrice ||
+          dc?.priceModule?.formatedPrice ||
+          "";
+      } catch { /* fall through */ }
     }
   }
 
-  return null;
-}
-
-async function scrapeViaPage(productId: string): Promise<{
-  title: string;
-  image: string;
-  price: string;
-}> {
-  const hosts = ["es.aliexpress.com", "www.aliexpress.com", "aliexpress.com"];
-
-  for (const host of hosts) {
-    try {
-      const url = `https://${host}/item/${productId}.html`;
-      const html = await httpsGet(url);
-
-      let title = "";
-      let image = "";
-      let price = "";
-
-      // Extract from runData
-      const runDataMatch = html.match(/window\.runData\s*=\s*(\{.+?\});/s);
-      if (runDataMatch) {
-        try {
-          const data = JSON.parse(runDataMatch[1]);
-          title =
-            data?.data?.pageModule?.title ||
-            data?.data?.titleModule?.subject ||
-            "";
-          image =
-            data?.data?.pageModule?.imagePath ||
-            data?.data?.imageModule?.imagePathList?.[0] ||
-            "";
-          price =
-            data?.data?.priceModule?.formatedActivityPrice ||
-            data?.data?.priceModule?.formatedPrice ||
-            "";
-          if (image && image.startsWith("//")) image = `https:${image}`;
-        } catch { /* fall through */ }
-      }
-
-      // Fallbacks
-      if (!title) {
-        const ogTitle = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
-        if (ogTitle) title = ogTitle[1];
-      }
-      if (!title) {
-        const t = html.match(/<title>([^<]+)<\/title>/i);
-        if (t) title = t[1].replace(/\s*[-–|]\s*AliExpress.*$/i, "").trim();
-      }
-      if (!image) {
-        const ogImg = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
-        if (ogImg) image = ogImg[1];
-      }
-      if (!image) {
-        const bgImg = html.match(/background-image:\s*url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
-        if (bgImg) image = bgImg[1];
-      }
-
-      // Clean
-      title = title
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#x27;/g, "'")
-        .replace(/<[^>]+>/g, "")
-        .trim()
-        .substring(0, 200);
-
-      if (title) {
-        return { title, image, price };
-      }
-    } catch {
-      // Try next host
-    }
+  // 3) Meta tags
+  if (!title) {
+    const ogt = html.match(
+      /<meta\s+property="og:title"\s+content="([^"]+)"/i
+    );
+    if (ogt) title = ogt[1];
+  }
+  if (!title) {
+    const tt = html.match(/<title>([^<]+)<\/title>/i);
+    if (tt) title = tt[1].replace(/\s*[-–|]\s*AliExpress.*$/i, "").trim();
+  }
+  if (!imageUrl) {
+    const ogi = html.match(
+      /<meta\s+property="og:image"\s+content="([^"]+)"/i
+    );
+    if (ogi) imageUrl = ogi[1];
+  }
+  if (!imageUrl) {
+    const bg = html.match(
+      /background-image:\s*url\(["']?(https?:\/\/[^"')]+)["']?\)/i
+    );
+    if (bg) imageUrl = bg[1];
   }
 
-  // Absolute last resort
-  return {
-    title: "",
-    image: "",
-    price: "",
-  };
+  // Clean
+  title = title
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/<[^>]+>/g, "")
+    .trim()
+    .substring(0, 200);
+
+  return { title: title || "", imageUrl, price };
 }
 
 scrapeRouter.post("/", async (req: Request, res: Response) => {
@@ -243,31 +190,38 @@ scrapeRouter.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  try {
-    // Strategy 1: Internal API (fast, JSON)
-    const apiResult = await scrapeViaApi(productId);
+  const hosts = [
+    `https://es.aliexpress.com/item/${productId}.html`,
+    `https://www.aliexpress.com/item/${productId}.html`,
+    `https://m.aliexpress.com/item/${productId}.html`,
+  ];
 
-    if (apiResult && apiResult.title) {
-      res.json({
-        title: apiResult.title,
-        imageUrl: apiResult.image,
-        price: apiResult.price,
-        url: `https://es.aliexpress.com/item/${productId}.html`,
-      });
-      return;
+  let lastError = "";
+
+  for (const hostUrl of hosts) {
+    try {
+      const { body } = await fetchPage(hostUrl);
+      const { title, imageUrl, price } = extractFromHtml(body);
+
+      if (title) {
+        res.json({
+          title,
+          imageUrl,
+          price,
+          url: `https://es.aliexpress.com/item/${productId}.html`,
+        });
+        return;
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
     }
-
-    // Strategy 2: Scrape HTML page
-    const pageResult = await scrapeViaPage(productId);
-
-    res.json({
-      title: pageResult.title || "Unknown product",
-      imageUrl: pageResult.image,
-      price: pageResult.price,
-      url: `https://es.aliexpress.com/item/${productId}.html`,
-    });
-  } catch (err) {
-    console.error("AliExpress scrape error:", err);
-    res.status(500).json({ error: "Failed to extract product data" });
   }
+
+  // All attempts failed — return partial
+  res.json({
+    title: "Unknown product",
+    imageUrl: "",
+    price: "",
+    url: `https://es.aliexpress.com/item/${productId}.html`,
+  });
 });

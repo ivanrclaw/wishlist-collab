@@ -1,0 +1,27 @@
+app = "wishlist-collab"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  DB_PATH = "/app/apps/server/data/wishlist.db"
+  NODE_ENV = "production"
+
+[[mounts]]
+  source = "wishlist_data"
+  destination = "/app/apps/server/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/api/health"
+    interval = "10s"
+    timeout = "5s"

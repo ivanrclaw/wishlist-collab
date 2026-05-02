@@ -8,6 +8,78 @@
   --color-surface-alt: #e9ecef;
 }
 
+@variant dark (&:where(.dark, .dark *));
+
 body {
   font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+/* Dark mode overrides */
+.dark body {
+  background-color: #0f0f0f;
+  color: #e5e5e5;
+}
+.dark .bg-white {
+  background-color: #1a1a1a;
+}
+.dark .bg-surface {
+  background-color: #111111;
+}
+.dark .bg-surface-alt {
+  background-color: #1e1e1e;
+}
+.dark .border-zinc-100 {
+  border-color: #2a2a2a;
+}
+.dark .border-zinc-200 {
+  border-color: #333333;
+}
+.dark .text-zinc-900 {
+  color: #e5e5e5;
+}
+.dark .text-zinc-600 {
+  color: #a0a0a0;
+}
+.dark .text-zinc-500 {
+  color: #808080;
+}
+.dark .text-zinc-400 {
+  color: #666666;
+}
+.dark .text-zinc-300 {
+  color: #4a4a4a;
+}
+.dark .from-zinc-100 {
+  --tw-gradient-from: #1a1a1a;
+}
+.dark .hover\:bg-surface:hover {
+  background-color: #1e1e1e;
+}
+.dark .hover\:text-zinc-900:hover {
+  color: #e5e5e5;
+}
+.dark .shadow-sm {
+  --tw-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.dark input,
+.dark textarea {
+  background-color: #1a1a1a;
+  border-color: #333333;
+  color: #e5e5e5;
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #555;
+}
+.dark .bg-red-50 {
+  background-color: #2d1a1a;
+}
+.dark .text-red-600 {
+  color: #ef4444;
+}
+.dark .bg-green-50 {
+  background-color: #1a2d1a;
+}
+.dark .text-green-700 {
+  color: #4ade80;
 }

@@ -7,6 +7,7 @@ import { AppDataSource } from "./config/database";
 import { authRouter } from "./routes/auth";
 import { wishlistRouter } from "./routes/wishlists";
 import { itemRouter } from "./routes/items";
+import { scrapeRouter } from "./routes/scrape";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -28,6 +29,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/auth", authRouter);
 app.use("/api/wishlists", wishlistRouter);
 app.use("/api/items", itemRouter);
+app.use("/api/scrape", scrapeRouter);
 
 // Serve frontend in production
 const frontendPath = path.join(__dirname, "../../web/dist");

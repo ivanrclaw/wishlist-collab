@@ -1,7 +1,8 @@
 import { Routes, Route, Link } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
+import { useTheme } from "@/hooks/use-theme";
 import { Button } from "@/components/ui/button";
-import { Gift, LogOut, Plus, List } from "lucide-react";
+import { Gift, LogOut, Plus, List, Sun, Moon } from "lucide-react";
 import HomePage from "@/pages/HomePage";
 import DashboardPage from "@/pages/DashboardPage";
 import LoginPage from "@/pages/LoginPage";
@@ -12,19 +13,20 @@ import WishlistAddPage from "@/pages/WishlistAddPage";
 
 export default function App() {
   const { user, logout, loading } = useAuth();
+  const { theme, toggle } = useTheme();
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex h-screen items-center justify-center bg-surface">
         <div className="h-8 w-8 animate-spin rounded-full border-3 border-brand border-t-transparent" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-surface">
+    <div className="min-h-screen bg-surface transition-colors duration-300">
       {/* Navbar */}
-      <nav className="sticky top-0 z-50 border-b border-zinc-100 bg-white/80 backdrop-blur-lg">
+      <nav className="sticky top-0 z-50 border-b border-zinc-100 bg-white/80 backdrop-blur-lg dark:border-zinc-800 dark:bg-zinc-900/80">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4">
           <Link to="/" className="flex items-center gap-2 text-xl font-bold">
             <Gift className="h-6 w-6 text-brand" />
@@ -33,7 +35,21 @@ export default function App() {
             </span>
           </Link>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            {/* Theme toggle */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggle}
+              title={theme === "dark" ? "Modo claro" : "Modo oscuro"}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-4 w-4" />
+              ) : (
+                <Moon className="h-4 w-4" />
+              )}
+            </Button>
+
             {user ? (
               <>
                 <Link to="/dashboard">
@@ -46,7 +62,7 @@ export default function App() {
                     <Plus className="h-4 w-4" /> Nueva lista
                   </Button>
                 </Link>
-                <Button variant="ghost" size="icon" onClick={logout} title="Logout">
+                <Button variant="ghost" size="icon" onClick={logout} title="Cerrar sesión">
                   <LogOut className="h-4 w-4" />
                 </Button>
               </>
@@ -80,7 +96,7 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-zinc-100 bg-white py-6 text-center text-sm text-zinc-400">
+      <footer className="border-t border-zinc-100 bg-white py-6 text-center text-sm text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500">
         Hecho con ❤️ · WishCollab &copy; {new Date().getFullYear()}
       </footer>
     </div>

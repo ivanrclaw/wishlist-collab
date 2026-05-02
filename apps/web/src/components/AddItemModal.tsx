@@ -15,6 +15,7 @@ import {
   ShoppingBag,
   CheckCircle,
   Sparkles,
+  Pencil,
 } from "lucide-react";
 
 interface ProductPreview {
@@ -31,6 +32,54 @@ interface AddItemModalProps {
   onAdded: () => void;
 }
 
+function extractFromAliExpressHtml(html: string): Partial<ProductPreview> {
+  let title = "";
+  let imageUrl = "";
+  let price = "";
+
+  // window.runData
+  const rd = html.match(/window\.runData\s*=\s*(\{.+?\});\s*<\/script>/s);
+  if (rd) {
+    try {
+      const d = JSON.parse(rd[1]);
+      title = d?.data?.pageModule?.title || d?.data?.titleModule?.subject || "";
+      price =
+        d?.data?.priceModule?.formatedActivityPrice ||
+        d?.data?.priceModule?.formatedPrice ||
+        "";
+      const img =
+        d?.data?.pageModule?.imagePath ||
+        d?.data?.imageModule?.imagePathList?.[0] ||
+        "";
+      if (img) imageUrl = img.startsWith("//") ? `https:${img}` : img;
+    } catch {}
+  }
+
+  // Meta fallbacks
+  if (!title) {
+    const ogt = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
+    if (ogt) title = ogt[1];
+  }
+  if (!title) {
+    const tt = html.match(/<title>([^<]+)<\/title>/i);
+    if (tt) title = tt[1].replace(/\s*[-–|]\s*AliExpress.*$/i, "").trim();
+  }
+  if (!imageUrl) {
+    const ogi = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+    if (ogi) imageUrl = ogi[1];
+  }
+
+  title = title
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/<[^>]+>/g, "")
+    .trim()
+    .substring(0, 200);
+
+  return { title, imageUrl, price };
+}
+
 export default function AddItemModal({
   open,
   onOpenChange,
@@ -40,27 +89,69 @@ export default function AddItemModal({
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<ProductPreview | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editImage, setEditImage] = useState("");
+  const [editPrice, setEditPrice] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
   const [added, setAdded] = useState(false);
+  const [scrapeFailed, setScrapeFailed] = useState(false);
 
   const handleScrape = async () => {
     setError("");
     setPreview(null);
+    setScrapeFailed(false);
     setLoading(true);
 
     try {
+      // Strategy 1: Try backend first
       const res = await apiFetch("/scrape", {
         method: "POST",
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      setPreview(data);
-    } catch (err) {
+
+      if (data.title && data.title !== "Unknown product") {
+        setPreview(data);
+        setEditTitle(data.title);
+        setEditImage(data.imageUrl || "");
+        setEditPrice(data.price || "");
+        setLoading(false);
+        return;
+      }
+
+      // Strategy 2: Client-side fetch via CORS proxy
+      const productId = url.match(/\/item\/(\d+)/)?.[1];
+      if (!productId) throw new Error("No product ID");
+
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(
+        `https://es.aliexpress.com/item/${productId}.html`
+      )}`;
+
+      const proxyRes = await fetch(proxyUrl);
+      if (!proxyRes.ok) throw new Error("Proxy failed");
+
+      const html = await proxyRes.text();
+      const extracted = extractFromAliExpressHtml(html);
+
+      if (extracted.title) {
+        const result = {
+          title: extracted.title,
+          imageUrl: extracted.imageUrl || "",
+          price: extracted.price || "",
+          url: `https://es.aliexpress.com/item/${productId}.html`,
+        };
+        setPreview(result);
+        setEditTitle(result.title);
+        setEditImage(result.imageUrl);
+        setEditPrice(result.price);
+      } else {
+        throw new Error("Could not extract");
+      }
+    } catch {
+      setScrapeFailed(true);
       setError(
-        err instanceof Error
-          ? err.message
-          : "No se pudo obtener el producto. ¿Es un link válido de AliExpress?"
+        "No se pudo extraer la información automáticamente. Puedes rellenar los datos manualmente."
       );
     } finally {
       setLoading(false);
@@ -68,18 +159,24 @@ export default function AddItemModal({
   };
 
   const handleAdd = async () => {
-    if (!preview) return;
     setAdding(true);
     setError("");
+
+    const finalTitle = editTitle || preview?.title || "";
+    if (!finalTitle.trim()) {
+      setError("El título es obligatorio");
+      setAdding(false);
+      return;
+    }
 
     try {
       await apiFetch(`/items/add/${editSlug}`, {
         method: "POST",
         body: JSON.stringify({
-          title: preview.title,
-          url: preview.url,
-          imageUrl: preview.imageUrl,
-          price: preview.price,
+          title: finalTitle,
+          url: preview?.url || url,
+          imageUrl: editImage,
+          price: editPrice,
         }),
       });
       setAdded(true);
@@ -87,13 +184,15 @@ export default function AddItemModal({
         setAdded(false);
         setUrl("");
         setPreview(null);
+        setScrapeFailed(false);
+        setEditTitle("");
+        setEditImage("");
+        setEditPrice("");
         onOpenChange(false);
         onAdded();
-      }, 1200);
+      }, 1000);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Error al añadir producto"
-      );
+      setError(err instanceof Error ? err.message : "Error al añadir");
     } finally {
       setAdding(false);
     }
@@ -105,6 +204,10 @@ export default function AddItemModal({
       setPreview(null);
       setError("");
       setAdded(false);
+      setScrapeFailed(false);
+      setEditTitle("");
+      setEditImage("");
+      setEditPrice("");
     }
     onOpenChange(o);
   };
@@ -142,6 +245,7 @@ export default function AddItemModal({
                       setUrl(e.target.value);
                       setError("");
                       setPreview(null);
+                      setScrapeFailed(false);
                     }}
                     onKeyDown={(e) => e.key === "Enter" && handleScrape()}
                     className="flex-1"
@@ -166,45 +270,77 @@ export default function AddItemModal({
                 </div>
               )}
 
-              {/* Preview card */}
-              {preview && (
-                <div className="animate-in overflow-hidden rounded-2xl border border-zinc-200 bg-surface-alt dark:border-zinc-700 dark:bg-zinc-800">
-                  {preview.imageUrl ? (
-                    <div className="relative h-44 overflow-hidden bg-white">
+              {/* Preview / Manual edit */}
+              {(preview || scrapeFailed) && (
+                <div className="flex flex-col gap-3">
+                  {/* Image */}
+                  {(editImage || preview?.imageUrl) ? (
+                    <div className="overflow-hidden rounded-xl bg-white p-3 dark:bg-zinc-800">
                       <img
-                        src={preview.imageUrl}
-                        alt={preview.title}
-                        className="h-full w-full object-contain p-4"
+                        src={editImage || preview?.imageUrl}
+                        alt="Preview"
+                        className="mx-auto h-40 object-contain"
                         onError={(e) => {
                           (e.target as HTMLImageElement).style.display = "none";
                         }}
                       />
                     </div>
                   ) : (
-                    <div className="flex h-32 items-center justify-center bg-surface">
-                      <ShoppingBag className="h-10 w-10 text-zinc-300" />
-                    </div>
+                    scrapeFailed && (
+                      <div className="flex h-24 items-center justify-center rounded-xl bg-surface-alt dark:bg-zinc-800">
+                        <ShoppingBag className="h-8 w-8 text-zinc-400" />
+                      </div>
+                    )
                   )}
-                  <div className="p-4">
-                    <h4 className="line-clamp-2 font-semibold">
-                      {preview.title}
-                    </h4>
-                    <div className="mt-2 flex items-center justify-between">
-                      {preview.price && (
-                        <span className="text-xl font-bold text-brand">
-                          {preview.price}
-                        </span>
-                      )}
+
+                  {/* Editable fields */}
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor="edit-title" className="text-xs text-zinc-500">
+                        Título *
+                      </Label>
+                      <Input
+                        id="edit-title"
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        placeholder="Nombre del producto"
+                        maxLength={200}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="flex flex-col gap-1">
+                        <Label htmlFor="edit-image" className="text-xs text-zinc-500">
+                          Imagen (URL)
+                        </Label>
+                        <Input
+                          id="edit-image"
+                          value={editImage}
+                          onChange={(e) => setEditImage(e.target.value)}
+                          placeholder="https://..."
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <Label htmlFor="edit-price" className="text-xs text-zinc-500">
+                          Precio
+                        </Label>
+                        <Input
+                          id="edit-price"
+                          value={editPrice}
+                          onChange={(e) => setEditPrice(e.target.value)}
+                          placeholder="12,99 €"
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>
               )}
 
               {/* Add button */}
-              {preview && (
+              {(preview || scrapeFailed) && (
                 <Button
                   onClick={handleAdd}
-                  disabled={adding}
+                  disabled={adding || !editTitle.trim()}
                   className="w-full"
                   size="lg"
                 >
@@ -221,7 +357,7 @@ export default function AddItemModal({
               )}
 
               <p className="text-center text-xs text-zinc-400">
-                Pega un link de AliExpress y se rellenará automáticamente.
+                Pega un link de AliExpress y se rellenará automáticamente. Si falla, edita los campos.
               </p>
             </>
           )}

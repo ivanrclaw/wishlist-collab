@@ -1,8 +1,22 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import * as https from "https";
+import * as crypto from "crypto";
 
 export const scrapeRouter = Router();
+
+// ------------------------------------------------------------------
+// AliExpress Official Affiliate API
+// Docs: https://openservice.aliexpress.com/doc/api.htm
+// Endpoint: http://gw.api.taobao.com/router/rest
+// Method:   aliexpress.affiliate.productdetail.get
+//
+// Requires APP_KEY + APP_SECRET from:
+//   1. Register at https://seller.aliexpress.com
+//   2. Go to https://developers.aliexpress.com → Create App
+//   3. Set env vars: ALIEXPRESS_APP_KEY / ALIEXPRESS_APP_SECRET
+// ------------------------------------------------------------------
+
+const API_URL = "https://gw.api.taobao.com/router/rest";
 
 const scrapeSchema = z.object({
   url: z.string().url().max(2000).refine((u) => u.includes("aliexpress.com"), {
@@ -10,67 +24,25 @@ const scrapeSchema = z.object({
   }),
 });
 
-function fetchPage(url: string): Promise<{ body: string; finalUrl: string }> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-
-    const options = {
-      hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
+function signRequest(params: Record<string, string>, secret: string): string {
+  // Sort keys alphabetically
+  const sorted = Object.keys(params)
+    .sort()
+    .reduce(
+      (acc, k) => {
+        acc[k] = params[k];
+        return acc;
       },
-      timeout: 10000,
-    };
+      {} as Record<string, string>
+    );
 
-    const req = https.request(options, (res) => {
-      // Handle redirects
-      if (
-        res.statusCode &&
-        [301, 302, 303, 307, 308].includes(res.statusCode) &&
-        res.headers.location
-      ) {
-        res.resume();
-        let redirectUrl = new URL(res.headers.location, url).href;
-        // Normalize es.aliexpress → www.aliexpress or keep as-is
-        return fetchPage(redirectUrl).then(resolve).catch(reject);
-      }
+  // Concat: secret + key1value1key2value2... + secret
+  const payload = Object.entries(sorted)
+    .map(([k, v]) => `${k}${v}`)
+    .join("");
+  const raw = `${secret}${payload}${secret}`;
 
-      if (!res.statusCode || res.statusCode >= 400) {
-        res.resume();
-        return reject(new Error(`HTTP ${res.statusCode}`));
-      }
-
-      const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => {
-        resolve({
-          body: Buffer.concat(chunks).toString("utf-8"),
-          finalUrl: url,
-        });
-      });
-    });
-
-    req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("Request timed out"));
-    });
-    req.end();
-  });
+  return crypto.createHash("md5").update(raw, "utf8").digest("hex").toUpperCase();
 }
 
 function extractProductId(url: string): string | null {
@@ -82,90 +54,73 @@ function extractProductId(url: string): string | null {
   return null;
 }
 
-function extractFromHtml(html: string): {
-  title: string;
-  imageUrl: string;
-  price: string;
-} {
-  let title = "";
-  let imageUrl = "";
-  let price = "";
-
-  // 1) window.runData (server-side rendered JSON)
-  const rdMatch = html.match(/window\.runData\s*=\s*(\{.+?\});\s*<\/script>/s);
-  if (rdMatch) {
-    try {
-      const rd = JSON.parse(rdMatch[1]);
-      const p = rd?.data?.priceModule;
-      price =
-        p?.formatedActivityPrice ||
-        p?.formatedPrice ||
-        p?.price ||
-        "";
-      title =
-        rd?.data?.pageModule?.title ||
-        rd?.data?.titleModule?.subject ||
-        "";
-      const img =
-        rd?.data?.pageModule?.imagePath ||
-        rd?.data?.imageModule?.imagePathList?.[0] ||
-        "";
-      if (img) imageUrl = img.startsWith("//") ? `https:${img}` : img;
-    } catch { /* fall through */ }
-  }
-
-  // 2) window.__data (another common pattern)
-  if (!title) {
-    const dcMatch = html.match(/window\.__data\s*=\s*['"](\{.+?\})['"];/s);
-    if (dcMatch) {
-      try {
-        const dc = JSON.parse(dcMatch[1]);
-        title = dc?.productInfo?.subject || dc?.title || "";
-        price =
-          dc?.priceModule?.formatedActivityPrice ||
-          dc?.priceModule?.formatedPrice ||
-          "";
-      } catch { /* fall through */ }
-    }
-  }
-
-  // 3) Meta tags
-  if (!title) {
-    const ogt = html.match(
-      /<meta\s+property="og:title"\s+content="([^"]+)"/i
-    );
-    if (ogt) title = ogt[1];
-  }
-  if (!title) {
-    const tt = html.match(/<title>([^<]+)<\/title>/i);
-    if (tt) title = tt[1].replace(/\s*[-–|]\s*AliExpress.*$/i, "").trim();
-  }
-  if (!imageUrl) {
-    const ogi = html.match(
-      /<meta\s+property="og:image"\s+content="([^"]+)"/i
-    );
-    if (ogi) imageUrl = ogi[1];
-  }
-  if (!imageUrl) {
-    const bg = html.match(
-      /background-image:\s*url\(["']?(https?:\/\/[^"')]+)["']?\)/i
-    );
-    if (bg) imageUrl = bg[1];
-  }
-
-  // Clean
-  title = title
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
-    .replace(/<[^>]+>/g, "")
-    .trim()
-    .substring(0, 200);
-
-  return { title: title || "", imageUrl, price };
+function timestamp(): string {
+  return new Date()
+    .toISOString()
+    .replace(/T/, " ")
+    .replace(/Z/, "")
+    .replace(/\..+/, "");
 }
 
+async function fetchProductViaAffiliateApi(
+  productId: string,
+  appKey: string,
+  appSecret: string
+): Promise<{ title: string; imageUrl: string; price: string }> {
+  const params: Record<string, string> = {
+    method: "aliexpress.affiliate.productdetail.get",
+    app_key: appKey,
+    sign_method: "md5",
+    timestamp: timestamp(),
+    format: "json",
+    v: "2.0",
+    product_ids: productId,
+    target_currency: "EUR",
+    target_language: "ES",
+    fields:
+      "product_title,sale_price,product_main_image_url,target_sale_price,target_original_price",
+    trackingId: "default",
+  };
+
+  const sign = signRequest(params, appSecret);
+  const body = new URLSearchParams({ ...params, sign });
+
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" },
+    body,
+  });
+
+  if (!res.ok) throw new Error(`API returned ${res.status}`);
+
+  const json = await res.json() as any;
+
+  if (json.error_response) {
+    throw new Error(
+      json.error_response.sub_msg || json.error_response.msg || "API error"
+    );
+  }
+
+  const result = json?.aliexpress_affiliate_productdetail_get_response?.resp_result?.result;
+  if (!result || !result.products || result.products.length === 0) {
+    throw new Error("No product data in API response");
+  }
+
+  const product = result.products[0];
+  return {
+    title: (product.product_title || "").substring(0, 200),
+    imageUrl: product.product_main_image_url || "",
+    price: product.target_sale_price
+      ? `${product.target_sale_price} €`
+      : product.sale_price
+        ? `${product.sale_price}`
+        : "",
+  };
+}
+
+// ------------------------------------------------------------------
+// Route handler
+// ------------------------------------------------------------------
 scrapeRouter.post("/", async (req: Request, res: Response) => {
   const parsed = scrapeSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -190,38 +145,48 @@ scrapeRouter.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  const hosts = [
-    `https://es.aliexpress.com/item/${productId}.html`,
-    `https://www.aliexpress.com/item/${productId}.html`,
-    `https://m.aliexpress.com/item/${productId}.html`,
-  ];
+  const appKey = process.env.ALIEXPRESS_APP_KEY;
+  const appSecret = process.env.ALIEXPRESS_APP_SECRET;
 
-  let lastError = "";
-
-  for (const hostUrl of hosts) {
-    try {
-      const { body } = await fetchPage(hostUrl);
-      const { title, imageUrl, price } = extractFromHtml(body);
-
-      if (title) {
-        res.json({
-          title,
-          imageUrl,
-          price,
-          url: `https://es.aliexpress.com/item/${productId}.html`,
-        });
-        return;
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-    }
+  if (!appKey || !appSecret) {
+    // Keys not configured → tell frontend to fall back to manual input
+    res.json({
+      title: "",
+      imageUrl: "",
+      price: "",
+      url: `https://es.aliexpress.com/item/${productId}.html`,
+      error: "AliExpress API keys not configured",
+    });
+    return;
   }
 
-  // All attempts failed — return partial
-  res.json({
-    title: "Unknown product",
-    imageUrl: "",
-    price: "",
-    url: `https://es.aliexpress.com/item/${productId}.html`,
-  });
+  try {
+    const data = await fetchProductViaAffiliateApi(productId, appKey, appSecret);
+
+    if (data.title) {
+      res.json({
+        title: data.title,
+        imageUrl: data.imageUrl,
+        price: data.price,
+        url: `https://es.aliexpress.com/item/${productId}.html`,
+      });
+    } else {
+      res.json({
+        title: "Unknown product",
+        imageUrl: data.imageUrl,
+        price: data.price,
+        url: `https://es.aliexpress.com/item/${productId}.html`,
+      });
+    }
+  } catch (err) {
+    console.error("AliExpress API error:", err);
+    // Don't fail — return empty so the frontend can show manual input
+    res.json({
+      title: "",
+      imageUrl: "",
+      price: "",
+      url: `https://es.aliexpress.com/item/${productId}.html`,
+      error: err instanceof Error ? err.message : "Scrape failed",
+    });
+  }
 });
